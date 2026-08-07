@@ -21,6 +21,7 @@
     },
     "plugins": [
       "expo-secure-store",
+      "./plugins/withCleartextTraffic",
       [
         "expo-location",
         {
