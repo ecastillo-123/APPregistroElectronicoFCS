@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "Checador",
+    "slug": "checador-movil",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "backgroundColor": "#FFFFFF"
+    },
+    "android": {
+      "package": "com.checador.app",
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ]
+    },
+    "plugins": [
+      "expo-secure-store",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Permitir a Checador conocer tu ubicación para registrar entrada y salida del centro de trabajo."
+        }
+      ]
+    ],
+    "extra": {
+      "apiUrl": "http://192.168.1.65:8000/api/v1"
+    }
+  }
+}
