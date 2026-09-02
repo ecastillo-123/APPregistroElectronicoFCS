@@ -1,3 +1,6 @@
+export type CheckinType = 'huella' | 'facial';
+export type SyncStatus = 'normal' | 'pendiente';
+
 export interface WorkCenter {
   id: number;
   nombre: string;
@@ -23,9 +26,21 @@ export interface UserProfile {
   work_center: WorkCenter | null;
 }
 
+export interface DeviceInfo {
+  uuid: string;
+  nombre?: string;
+  marca?: string;
+  modelo?: string;
+  plataforma?: string;
+  version_so?: string;
+  app_version?: string;
+}
+
 export interface CheckInResult {
   id: number;
   tipo: 'entrada' | 'salida';
+  checkin_type?: CheckinType | null;
+  sync_status?: SyncStatus | null;
   fecha?: string | null;
   dentro_rango: boolean;
   distancia_metros?: number | null;
@@ -69,6 +84,19 @@ export interface CheckInResponse {
   registrada: boolean;
   check_in: CheckInResult;
   mensaje: string;
+}
+
+export interface PendingCheckIn {
+  client_uuid: string;
+  checkin_type: CheckinType;
+  tipo: 'entrada' | 'salida';
+  lat: number;
+  lng: number;
+  precision_metros: number | null;
+  fecha_dispositivo: string;
+  pending_checkin_datetime: string;
+  device: DeviceInfo;
+  dentro_rango: boolean;
 }
 
 export interface ApiError {

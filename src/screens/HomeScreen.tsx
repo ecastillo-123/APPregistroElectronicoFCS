@@ -1,20 +1,36 @@
-import { api, mensajeDeError } from '../api';
+import { api, detalleDeError, isNetworkError, mensajeDeError } from '../api';
 import { Badge, Button } from '../components/ui';
 import { getDeviceId, getDeviceInfo, storage } from '../config';
-import { colors, radii, shadow } from '../theme';
+import { authenticateForCheckin, isBiometricAvailable } from '../biometric';
+import { getPendingCheckins, savePendingCheckin } from '../pendingQueue';
+import {
+  radii,
+  type Theme,
+  type ThemeColors,
+  useTheme,
+  useThemedStyles,
+} from '../theme';
 import type {
   CheckInResponse,
+  CheckinType,
   EstadoResponse,
+  PendingCheckIn,
   UserProfile,
 } from '../types';
 import * as Location from 'expo-location';
+import { useNavigation } from '@react-navigation/native';
+import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import type { RootStackParamList } from '../../App';
+import * as Crypto from 'expo-crypto';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   RefreshControl,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
+  TouchableOpacity,
   View,
 } from 'react-native';
 
@@ -22,6 +38,8 @@ interface Props {
   token: string;
   onLogout: () => void;
 }
+
+type NavigationProp = NativeStackNavigationProp<RootStackParamList>;
 
 interface Geo {
   lat: number;
@@ -46,6 +64,11 @@ function distanciaMetros(
 }
 
 export function HomeScreen({ token, onLogout }: Props) {
+  const { theme, toggle } = useTheme();
+  const styles = useThemedStyles(hacerEstilos);
+  const { colors } = theme;
+  const navigation = useNavigation<NavigationProp>();
+
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loadingEstado, setLoadingEstado] = useState(true);
   const [geo, setGeo] = useState<Geo | null>(null);
@@ -53,11 +76,13 @@ export function HomeScreen({ token, onLogout }: Props) {
     'buscando',
   );
   const [checando, setChecando] = useState<'entrada' | 'salida' | null>(null);
+  const [pendingCount, setPendingCount] = useState(0);
   const [resultado, setResultado] = useState<{
     ok: boolean;
     mensaje: string;
     distancia: number | null;
     tipo: string;
+    checkin_type?: CheckinType;
   } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const watchRef = useRef<Location.LocationSubscription | null>(null);
@@ -81,10 +106,15 @@ export function HomeScreen({ token, onLogout }: Props) {
     }
   }, [onLogout]);
 
+  const cargarPendientes = useCallback(async () => {
+    const pending = await getPendingCheckins();
+    setPendingCount(pending.length);
+  }, []);
+
   useEffect(() => {
     cargarEstado();
-  }, [cargarEstado]);
-
+    cargarPendientes();
+  }, [cargarEstado, cargarPendientes]);
   useEffect(() => {
     let activo = true;
 
@@ -154,19 +184,40 @@ export function HomeScreen({ token, onLogout }: Props) {
       return;
     }
 
+    // Check biometric availability
+    const biometric = await isBiometricAvailable();
+    if (!biometric.available) {
+      Alert.alert('Biométrico no disponible', biometric.reason ?? 'No se puede usar autenticación biométrica en este dispositivo.');
+      return;
+    }
+
+    // Authenticate
+    const checkinType = await authenticateForCheckin();
+    if (!checkinType) {
+      // User cancelled or failed
+      return;
+    }
+
     setChecando(tipo);
     setResultado(null);
 
-    try {
-      const deviceId = await getDeviceId();
-      const info = getDeviceInfo();
+    const deviceId = await getDeviceId();
+    const info = getDeviceInfo();
+    const clientUuid = Crypto.randomUUID();
+    const now = new Date();
+    const dentroRango = centro
+      ? distanciaMetros(geo.lat, geo.lng, centro.lat, centro.lng) <= centro.radio_metros
+      : false;
 
+    try {
       const { data } = await api.post<CheckInResponse>('/checar', {
         tipo,
         lat: geo.lat,
         lng: geo.lng,
         precision_metros: geo.precision ?? null,
-        fecha_dispositivo: new Date().toISOString(),
+        fecha_dispositivo: now.toISOString(),
+        checkin_type: checkinType,
+        client_uuid: clientUuid,
         device: { ...info, uuid: deviceId },
       });
 
@@ -175,11 +226,37 @@ export function HomeScreen({ token, onLogout }: Props) {
         mensaje: data.mensaje,
         distancia: data.check_in.distancia_metros ?? null,
         tipo: data.check_in.tipo,
+        checkin_type: checkinType,
       });
 
       cargarEstado();
+      cargarPendientes();
     } catch (err) {
-      Alert.alert('Error al checar', mensajeDeError(err));
+      if (isNetworkError(err)) {
+        // Save to pending queue
+        const pending: PendingCheckIn = {
+          client_uuid: clientUuid,
+          checkin_type: checkinType,
+          tipo,
+          lat: geo.lat,
+          lng: geo.lng,
+          precision_metros: geo.precision ?? null,
+          fecha_dispositivo: now.toISOString(),
+          pending_checkin_datetime: now.toISOString(),
+          device: { ...info, uuid: deviceId },
+          dentro_rango: dentroRango,
+        };
+        await savePendingCheckin(pending);
+        Alert.alert(
+          'Checada guardada',
+          'Tu checada fue guardada y se enviará automáticamente cuando haya conexión a internet.',
+        );
+      } else {
+        Alert.alert(
+          'Error al checar',
+          `${mensajeDeError(err)}\n\nDetalle técnico:\n${detalleDeError(err)}`,
+        );
+      }
     } finally {
       setChecando(null);
     }
@@ -187,7 +264,7 @@ export function HomeScreen({ token, onLogout }: Props) {
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await cargarEstado();
+    await Promise.all([cargarEstado(), cargarPendientes()]);
     setRefreshing(false);
   };
 
@@ -204,27 +281,51 @@ export function HomeScreen({ token, onLogout }: Props) {
       style={styles.flex}
       contentContainerStyle={styles.wrap}
       refreshControl={
-        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={onRefresh}
+          tintColor={colors.muted}
+          colors={[colors.blue]}
+          progressBackgroundColor={colors.card}
+        />
       }
     >
       <View style={styles.header}>
         <View style={styles.headerRow}>
-          <View>
+          <View style={styles.headerInfo}>
             <Text style={styles.greeting}>Hola,</Text>
             <Text style={styles.name}>{profile?.employee?.nombre_completo ?? profile?.name}</Text>
             <Text style={styles.badgeNum}>
               No. {profile?.employee?.numero_empleado}
             </Text>
           </View>
-          <Button
-            label="Salir"
-            variant="ghost"
-            onPress={async () => {
-              await storage.clearToken();
-              onLogout();
-            }}
-            style={styles.logout}
-          />
+          <View style={styles.headerActions}>
+            {pendingCount > 0 && (
+              <TouchableOpacity
+                style={[styles.pendingBadge, { backgroundColor: colors.danger }]}
+                onPress={() => navigation.navigate('PendingCheckIns', { token })}
+              >
+                <Text style={styles.pendingBadgeText}>{pendingCount}</Text>
+              </TouchableOpacity>
+            )}
+            <View style={styles.themeRow}>
+              <Switch
+                value={theme.isDark}
+                onValueChange={toggle}
+                trackColor={{ false: colors.line, true: colors.blueSoft }}
+                thumbColor={theme.isDark ? colors.blue : colors.white}
+              />
+            </View>
+            <Button
+              label="Salir"
+              variant="ghost"
+              onPress={async () => {
+                await storage.clearToken();
+                onLogout();
+              }}
+              style={styles.logout}
+            />
+          </View>
         </View>
       </View>
 
@@ -300,14 +401,23 @@ export function HomeScreen({ token, onLogout }: Props) {
             { backgroundColor: resultado.ok ? colors.successSoft : colors.dangerSoft },
           ]}
         >
-          <Text
-            style={[
-              styles.resultTitle,
-              { color: resultado.ok ? colors.success : colors.danger },
-            ]}
-          >
-            Checada de {resultado.tipo} {resultado.ok ? 'registrada' : 'registrada fuera de área'}
-          </Text>
+          <View style={styles.resultHeader}>
+            <Text
+              style={[
+                styles.resultTitle,
+                { color: resultado.ok ? colors.success : colors.danger },
+              ]}
+            >
+              Checada de {resultado.tipo}{' '}
+              {resultado.ok ? 'registrada' : 'registrada fuera de área'}
+            </Text>
+            {resultado.checkin_type && (
+              <Badge
+                tone="neutral"
+                text={resultado.checkin_type === 'huella' ? 'Huella' : 'Facial'}
+              />
+            )}
+          </View>
           <Text
             style={[
               styles.resultMsg,
@@ -341,149 +451,187 @@ export function HomeScreen({ token, onLogout }: Props) {
   );
 }
 
-const styles = StyleSheet.create({
-  flex: {
-    flex: 1,
-    backgroundColor: colors.paper,
-  },
-  center: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  loadingText: {
-    color: colors.muted,
-    fontSize: 16,
-  },
-  wrap: {
-    padding: 20,
-    gap: 16,
-    paddingBottom: 40,
-  },
-  header: {
-    marginBottom: 4,
-  },
-  headerRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-  },
-  greeting: {
-    fontSize: 14,
-    color: colors.muted,
-  },
-  name: {
-    fontSize: 26,
-    fontWeight: '800',
-    color: colors.ink,
-    letterSpacing: -0.4,
-  },
-  badgeNum: {
-    marginTop: 4,
-    fontSize: 13,
-    color: colors.amberDeep,
-    fontWeight: '700',
-  },
-  logout: {
-    minHeight: 44,
-    paddingVertical: 10,
-  },
-  card: {
-    backgroundColor: colors.card,
-    borderRadius: radii.lg,
-    padding: 18,
-    gap: 12,
-    ...shadow,
-  },
-  centerCard: {
-    alignItems: 'center',
-  },
-  centroName: {
-    fontSize: 19,
-    fontWeight: '800',
-    color: colors.ink,
-  },
-  centroDir: {
-    fontSize: 13,
-    color: colors.muted,
-    textAlign: 'center',
-  },
-  radioRow: {
-    marginTop: 2,
-  },
-  alertCard: {
-    backgroundColor: colors.amberSoft,
-  },
-  alertTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: colors.amberDeep,
-  },
-  alertText: {
-    fontSize: 13,
-    color: colors.inkSoft,
-    lineHeight: 19,
-  },
-  sectionTitle: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: colors.muted,
-    textTransform: 'uppercase',
-    letterSpacing: 0.6,
-  },
-  geoText: {
-    color: colors.muted,
-    fontSize: 14,
-  },
-  geoError: {
-    color: colors.danger,
-    fontSize: 14,
-  },
-  coordRow: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  coordBox: {
-    flex: 1,
-    backgroundColor: colors.paper,
-    borderRadius: radii.md,
-    padding: 12,
-  },
-  coordLabel: {
-    fontSize: 11,
-    color: colors.muted,
-    fontWeight: '600',
-    textTransform: 'uppercase',
-    letterSpacing: 0.4,
-  },
-  coordValue: {
-    marginTop: 2,
-    fontSize: 16,
-    fontWeight: '700',
-    color: colors.ink,
-    fontVariant: ['tabular-nums'],
-  },
-  rangeRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  rangeText: {
-    fontSize: 14,
-    color: colors.inkSoft,
-    fontWeight: '600',
-  },
-  resultTitle: {
-    fontSize: 15,
-    fontWeight: '800',
-  },
-  resultMsg: {
-    fontSize: 13,
-    lineHeight: 19,
-  },
-  actions: {
-    gap: 12,
-  },
-  actionButton: {
-    width: '100%',
-  },
-});
+function hacerEstilos(colors: ThemeColors, theme: Theme) {
+  return StyleSheet.create({
+    flex: {
+      flex: 1,
+      backgroundColor: colors.paper,
+    },
+    center: {
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    loadingText: {
+      color: colors.muted,
+      fontSize: 16,
+    },
+    wrap: {
+      padding: 20,
+      gap: 16,
+      paddingBottom: 40,
+    },
+    header: {
+      marginBottom: 4,
+    },
+    headerRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'flex-start',
+    },
+    headerInfo: {
+      flex: 1,
+      paddingRight: 12,
+    },
+    headerActions: {
+      alignItems: 'flex-end',
+      gap: 8,
+    },
+    themeRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+    },
+    greeting: {
+      fontSize: 14,
+      color: colors.muted,
+    },
+    name: {
+      fontSize: 26,
+      fontWeight: '800',
+      color: colors.ink,
+      letterSpacing: -0.4,
+    },
+    badgeNum: {
+      marginTop: 4,
+      fontSize: 13,
+      color: colors.blueDeep,
+      fontWeight: '700',
+    },
+    logout: {
+      minHeight: 44,
+      paddingVertical: 10,
+    },
+    card: {
+      backgroundColor: colors.card,
+      borderRadius: radii.lg,
+      padding: 18,
+      gap: 12,
+      borderWidth: 1,
+      borderColor: colors.line,
+      ...theme.shadow,
+    },
+    centerCard: {
+      alignItems: 'center',
+    },
+    centroName: {
+      fontSize: 19,
+      fontWeight: '800',
+      color: colors.ink,
+    },
+    centroDir: {
+      fontSize: 13,
+      color: colors.muted,
+      textAlign: 'center',
+    },
+    radioRow: {
+      marginTop: 2,
+    },
+    alertCard: {
+      backgroundColor: colors.blueSoft,
+    },
+    alertTitle: {
+      fontSize: 16,
+      fontWeight: '800',
+      color: colors.blueDeep,
+    },
+    alertText: {
+      fontSize: 13,
+      color: colors.inkSoft,
+      lineHeight: 19,
+    },
+    sectionTitle: {
+      fontSize: 13,
+      fontWeight: '700',
+      color: colors.muted,
+      textTransform: 'uppercase',
+      letterSpacing: 0.6,
+    },
+    geoText: {
+      color: colors.muted,
+      fontSize: 14,
+    },
+    geoError: {
+      color: colors.danger,
+      fontSize: 14,
+    },
+    coordRow: {
+      flexDirection: 'row',
+      gap: 12,
+    },
+    coordBox: {
+      flex: 1,
+      backgroundColor: colors.cardAlt,
+      borderRadius: radii.md,
+      padding: 12,
+      borderWidth: 1,
+      borderColor: colors.line,
+    },
+    coordLabel: {
+      fontSize: 11,
+      color: colors.muted,
+      fontWeight: '600',
+      textTransform: 'uppercase',
+      letterSpacing: 0.4,
+    },
+    coordValue: {
+      marginTop: 2,
+      fontSize: 16,
+      fontWeight: '700',
+      color: colors.ink,
+      fontVariant: ['tabular-nums'],
+    },
+    rangeRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+    },
+    rangeText: {
+      fontSize: 14,
+      color: colors.inkSoft,
+      fontWeight: '600',
+    },
+    resultTitle: {
+      fontSize: 15,
+      fontWeight: '800',
+    },
+    resultHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      flexWrap: 'wrap',
+      gap: 8,
+    },
+    resultMsg: {
+      fontSize: 13,
+      lineHeight: 19,
+    },
+    actions: {
+      gap: 12,
+    },
+    actionButton: {
+      width: '100%',
+    },
+    pendingBadge: {
+      minWidth: 24,
+      height: 24,
+      borderRadius: 12,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: 6,
+    },
+    pendingBadgeText: {
+      color: '#fff',
+      fontSize: 13,
+      fontWeight: '800',
+    },
+  });
+}
