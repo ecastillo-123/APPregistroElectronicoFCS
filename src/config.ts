@@ -49,7 +49,7 @@ export function getDeviceInfo() {
     marca: Device.brand ?? undefined,
     modelo: Device.modelName ?? undefined,
     plataforma: Platform.OS,
-    version_so: Device.osVersion ?? Platform.Version,
+    version_so: (Device.osVersion ?? String(Platform.Version)) || undefined,
     app_version: Application.nativeApplicationVersion ?? '1.0.0',
   };
 }

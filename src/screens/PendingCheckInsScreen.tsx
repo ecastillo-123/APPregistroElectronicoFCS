@@ -30,7 +30,8 @@ function formatFecha(iso: string): string {
 }
 
 export function PendingCheckInsScreen({ token }: Props) {
-  const { colors } = useTheme();
+  const { theme } = useTheme();
+  const { colors } = theme;
   const styles = useThemedStyles(hacerEstilos);
 
   const [pending, setPending] = useState<PendingCheckIn[]>([]);
@@ -138,9 +139,9 @@ export function PendingCheckInsScreen({ token }: Props) {
             <Button
               label="Reenviar"
               variant="primary"
-              size="sm"
               loading={isSyncingThis}
               disabled={isSyncingThis}
+              style={styles.compactButton}
               onPress={async () => {
                 const ok = await sincronizar(item);
                 if (ok) {
@@ -153,7 +154,7 @@ export function PendingCheckInsScreen({ token }: Props) {
             <Button
               label="Eliminar"
               variant="ghost"
-              size="sm"
+              style={styles.compactButton}
               onPress={() => eliminar(item.client_uuid)}
             />
           </View>
@@ -257,6 +258,11 @@ function hacerEstilos(colors: import('../theme').ThemeColors) {
       fontVariant: ['tabular-nums'],
     },
     itemActions: { flexDirection: 'row', gap: 8 },
+    compactButton: {
+      paddingVertical: 8,
+      paddingHorizontal: 12,
+      minHeight: 36,
+    },
     footer: { padding: 16, paddingTop: 8 },
     empty: {
       flex: 1,

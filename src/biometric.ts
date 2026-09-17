@@ -1,4 +1,5 @@
 import * as LocalAuthentication from 'expo-local-authentication';
+import { AuthenticationType } from 'expo-local-authentication';
 import type { CheckinType } from './types';
 
 export interface BiometricAvailability {
@@ -7,14 +8,33 @@ export interface BiometricAvailability {
   reason?: string;
 }
 
+export const CHECKIN_TYPE_LABELS: Record<CheckinType, string> = {
+  huella: 'Huella dactilar',
+  facial: 'Reconocimiento facial',
+};
+
+function toCheckinType(authType: AuthenticationType): CheckinType | null {
+  if (authType === AuthenticationType.FINGERPRINT) {
+    return 'huella';
+  }
+  if (authType === AuthenticationType.FACIAL_RECOGNITION) {
+    return 'facial';
+  }
+  return null;
+}
+
 /**
- * Checks if biometric authentication is available on this device.
+ * Checks which biometric authentication methods are available on this device.
  */
-export async function isBiometricAvailable(): Promise<BiometricAvailability> {
+export async function getBiometricAvailability(): Promise<BiometricAvailability> {
   try {
     const hardware = await LocalAuthentication.hasHardwareAsync();
     if (!hardware) {
-      return { available: false, types: [], reason: 'Tu dispositivo no soporta autenticación biométrica.' };
+      return {
+        available: false,
+        types: [],
+        reason: 'Tu dispositivo no soporta autenticación biométrica.',
+      };
     }
 
     const enrolled = await LocalAuthentication.isEnrolledAsync();
@@ -29,11 +49,19 @@ export async function isBiometricAvailable(): Promise<BiometricAvailability> {
     const supportedTypes = await LocalAuthentication.supportedAuthenticationTypesAsync();
     const types: CheckinType[] = [];
 
-    if (supportedTypes.includes(LocalAuthentication.LocalAuthenticationType.FACIAL)) {
-      types.push('facial');
+    for (const authType of supportedTypes) {
+      const checkinType = toCheckinType(authType);
+      if (checkinType && !types.includes(checkinType)) {
+        types.push(checkinType);
+      }
     }
-    if (supportedTypes.includes(LocalAuthentication.LocalAuthenticationType.FINGERPRINT)) {
-      types.push('huella');
+
+    if (types.length === 0) {
+      return {
+        available: false,
+        types: [],
+        reason: 'No se detectó un método biométrico usable en este dispositivo.',
+      };
     }
 
     return { available: true, types };
@@ -47,31 +75,20 @@ export async function isBiometricAvailable(): Promise<BiometricAvailability> {
 }
 
 /**
- * Performs biometric authentication and returns the type used, or null if cancelled/failed.
+ * Performs biometric authentication using the selected checkin type.
+ * Returns true when the user successfully authenticates.
  */
-export async function authenticateForCheckin(): Promise<CheckinType | null> {
+export async function authenticateWithType(checkinType: CheckinType): Promise<boolean> {
   try {
+    const methodLabel = CHECKIN_TYPE_LABELS[checkinType];
     const result = await LocalAuthentication.authenticateAsync({
-      promptMessage: 'Verifica tu identidad para registrar la checada',
+      promptMessage: `Verifica tu ${methodLabel.toLowerCase()} para registrar la checada`,
       disableDeviceFallback: true,
       cancelLabel: 'Cancelar',
     });
 
-    if (result.success) {
-      // Determine which type was used based on available hardware
-      const supportedTypes = await LocalAuthentication.supportedAuthenticationTypesAsync();
-      if (supportedTypes.includes(LocalAuthentication.LocalAuthenticationType.FACIAL)) {
-        return 'facial';
-      }
-      if (supportedTypes.includes(LocalAuthentication.LocalAuthenticationType.FINGERPRINT)) {
-        return 'huella';
-      }
-      // Fallback to huella if we can't determine
-      return 'huella';
-    }
-
-    return null;
+    return result.success;
   } catch {
-    return null;
+    return false;
   }
 }

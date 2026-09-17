@@ -1,7 +1,11 @@
 import { api, detalleDeError, isNetworkError, mensajeDeError } from '../api';
 import { Badge, Button } from '../components/ui';
 import { getDeviceId, getDeviceInfo, storage } from '../config';
-import { authenticateForCheckin, isBiometricAvailable } from '../biometric';
+import {
+  authenticateWithType,
+  CHECKIN_TYPE_LABELS,
+  getBiometricAvailability,
+} from '../biometric';
 import { getPendingCheckins, savePendingCheckin } from '../pendingQueue';
 import {
   radii,
@@ -178,23 +182,11 @@ export function HomeScreen({ token, onLogout }: Props) {
     };
   }, []);
 
-  const checar = async (tipo: 'entrada' | 'salida') => {
+  const enviarChecada = async (
+    tipo: 'entrada' | 'salida',
+    checkinType: CheckinType,
+  ) => {
     if (!geo) {
-      Alert.alert('Sin ubicación', 'Espera a que se obtenga tu ubicación antes de checar.');
-      return;
-    }
-
-    // Check biometric availability
-    const biometric = await isBiometricAvailable();
-    if (!biometric.available) {
-      Alert.alert('Biométrico no disponible', biometric.reason ?? 'No se puede usar autenticación biométrica en este dispositivo.');
-      return;
-    }
-
-    // Authenticate
-    const checkinType = await authenticateForCheckin();
-    if (!checkinType) {
-      // User cancelled or failed
       return;
     }
 
@@ -206,7 +198,8 @@ export function HomeScreen({ token, onLogout }: Props) {
     const clientUuid = Crypto.randomUUID();
     const now = new Date();
     const dentroRango = centro
-      ? distanciaMetros(geo.lat, geo.lng, centro.lat, centro.lng) <= centro.radio_metros
+      ? distanciaMetros(geo.lat, geo.lng, centro.lat, centro.lng) <=
+        centro.radio_metros
       : false;
 
     try {
@@ -260,6 +253,59 @@ export function HomeScreen({ token, onLogout }: Props) {
     } finally {
       setChecando(null);
     }
+  };
+
+  const seleccionarMetodoBiometrico = async (
+    tipo: 'entrada' | 'salida',
+    availableTypes: CheckinType[],
+  ) => {
+    if (availableTypes.length === 1) {
+      const [checkinType] = availableTypes;
+      const ok = await authenticateWithType(checkinType);
+      if (ok) {
+        await enviarChecada(tipo, checkinType);
+      }
+      return;
+    }
+
+    Alert.alert(
+      'Método de verificación',
+      'Selecciona cómo quieres verificar tu identidad para esta checada.',
+      [
+        ...availableTypes.map((checkinType) => ({
+          text: CHECKIN_TYPE_LABELS[checkinType],
+          onPress: async () => {
+            const ok = await authenticateWithType(checkinType);
+            if (ok) {
+              await enviarChecada(tipo, checkinType);
+            }
+          },
+        })),
+        { text: 'Cancelar', style: 'cancel' as const },
+      ],
+    );
+  };
+
+  const checar = async (tipo: 'entrada' | 'salida') => {
+    if (!geo) {
+      Alert.alert(
+        'Sin ubicación',
+        'Espera a que se obtenga tu ubicación antes de checar.',
+      );
+      return;
+    }
+
+    const biometric = await getBiometricAvailability();
+    if (!biometric.available) {
+      Alert.alert(
+        'Biométrico no disponible',
+        biometric.reason ??
+          'No se puede usar autenticación biométrica en este dispositivo.',
+      );
+      return;
+    }
+
+    await seleccionarMetodoBiometrico(tipo, biometric.types);
   };
 
   const onRefresh = async () => {

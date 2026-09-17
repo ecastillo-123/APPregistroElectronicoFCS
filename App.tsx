@@ -17,7 +17,7 @@ import { getPendingCheckins, removePendingCheckin } from './src/pendingQueue';
 import { getDeviceId, getDeviceInfo } from './src/config';
 import type { PendingCheckIn } from './src/types';
 
-type RootStackParamList = {
+export type RootStackParamList = {
   Login: undefined;
   Home: { token: string };
   PendingCheckIns: { token: string };
